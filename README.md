@@ -62,8 +62,8 @@
 
 | 文件 | 怎么用 |
 |---|---|
-| `GZIST-DormSignin-v2.0.0.exe` | 绿色单文件，任意目录双击即用 |
-| `GZIST-DormSignin-v2.0.0-windows-x64-setup.exe` | 安装器，自动建开始菜单快捷方式 |
+| `GZIST-DormSignin-v2.0.1.exe` | 绿色单文件，任意目录双击即用 |
+| `GZIST-DormSignin-v2.0.1-windows-x64-setup.exe` | 安装器，自动建开始菜单快捷方式 |
 | `SHA256SUMS` | 下载文件的 SHA-256 校验值 |
 
 均**不需要管理员权限**。首次打开被 Windows 拦截时，点 **更多信息 → 仍要运行**（无代码签名证书，只需一次）。
@@ -179,7 +179,7 @@ GZIST DormSignin.exe -selftest   # 只读自检：配置/凭据/Edge/验证码�
 | `internal/store` | 设置 + 凭据管理器 + 旧配置导入 |
 | `internal/art` | 程序绘制的图标（金黄星四态+呼吸、AppIcon） |
 
-**发布**：改 `mygo.json` 版本 → `go tool mygo build` → `git tag && git push` → `gh release create` 上传 exe 与 SHA-256。
+**发布**：改 `mygo.json` 版本与发布说明 → 测试并提交源码 → `go tool mygo build -o <隔离输出目录>` → 核验版本与 `vcs.modified=false` → 原子推送 main 和 annotated tag → 创建草稿并上传 EXE、Setup 与 SHA-256 → 核验资产后公开。
 </details>
 
 ## 🙏 声明与致谢

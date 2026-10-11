@@ -42,19 +42,33 @@ type model struct {
 	autostart            bool
 	version              string
 
-	phase     string // tray line text mirror
-	resultOK  bool
-	notice    string
-	neutral   bool // the notice is an expected idle state, not an error
-	logs      []string
-	logScroll ui.ScrollState
-	act       actions
+	phase         string // tray line text mirror
+	resultOK      bool   // confirmed success for the current account/day, not last attempt
+	statusAccount string
+	statusDate    string
+	notice        string
+	neutral       bool // the notice is an expected idle state, not an error
+	logs          []string
+	logScroll     ui.ScrollState
+	act           actions
 }
 
 func (m *model) setPhase(title, _ string) { m.phase = title }
+
+// Called only on the UI thread. Account/day rollover discards stale notices too.
+func (m *model) syncSuccess(account string, now time.Time, success bool) {
+	date := now.Format("2006-01-02")
+	if m.statusAccount != account || m.statusDate != date {
+		m.notice, m.neutral = "", false
+	}
+	m.statusAccount, m.statusDate, m.resultOK = account, date, success
+}
 func (m *model) setResult(ok, neutral bool, reason string) {
-	m.resultOK = ok
+	// The ledger owns resultOK: a later failed attempt cannot revoke success.
 	m.notice = reason
+	if !ok {
+		m.notice = "最近一次尝试：" + reason
+	}
 	m.neutral = neutral
 }
 

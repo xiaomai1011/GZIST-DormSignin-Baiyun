@@ -32,7 +32,7 @@ import (
 const appTitle = "GZIST DormSignin"
 
 // Identifies this local repair even before a release tag is created.
-const repairBuild = "edge-job-spa-20261010-r2"
+const repairBuild = "daily-ledger-20261011-r3"
 
 func buildIdentity() string {
 	parts := []string{"修复构建: " + repairBuild}
@@ -56,10 +56,9 @@ type app struct {
 	tray *mygo.Tray
 	menu *mygo.Menu
 
-	lastRunDate string
-	lastRunTime string
-	running     atomic.Bool
-	breathe     bool // tray star breathes while monitoring (idle & armed)
+	ledger  *scheduleLedger
+	running atomic.Bool
+	breathe bool // tray star breathes while monitoring (idle & armed)
 }
 
 func main() {
@@ -94,13 +93,18 @@ func (a *app) ready() {
 	logDir, _ := mygo.App.Path(mygo.PathLogs)
 	a.log = applog.New(logDir)
 	a.store = store.New(dataDir)
+	var ledgerErr error
+	a.ledger, ledgerErr = openScheduleLedger(filepath.Join(dataDir, "schedule-state.json"))
+	if ledgerErr != nil {
+		a.log.Add("签到状态读取失败（无法恢复此前成功记录）：" + ledgerErr.Error())
+	}
 	a.log.Printf("GZIST DormSignin v%s 启动 (%s/%s)", mygo.App.Version(), runtime.GOOS, runtime.GOARCH)
 	a.log.Add(buildIdentity())
 	if exe, err := os.Executable(); err == nil {
 		a.log.Add("运行文件: " + exe)
 	}
 	if profile, err := edge.ProfilePath(a.store.Load()); err == nil {
-		a.log.Add("Edge 专用目录: " + profile)
+		a.log.Add("Edge 专用目录基路径（签到使用 accounts-v1 下的账号隔离目录）: " + profile)
 	}
 
 	if msg := a.importLegacy(); msg != "" {
@@ -147,69 +151,69 @@ func (a *app) ready() {
 	}
 }
 
-// scheduleLoop checks every 20s whether now matches one of the configured
-// trigger times; the day+time pair makes each slot fire exactly once.
+// Claims are durable before jitter; success is independent of attempted slots.
 func (a *app) scheduleLoop() {
 	t := time.NewTicker(20 * time.Second)
 	defer t.Stop()
 	for range t.C {
-		a.post(func() { a.syncTray() }) // keep the tray state fresh
-		cfg := a.store.Load()           // pick up saved changes live
-		if cfg.Holiday {
-			a.m.setPhase("假期模式", "已停用自动签到，回校后关掉它")
-			continue
-		}
-		if a.running.Load() {
-			continue
-		}
+		a.post(func() { a.syncTray() })
+		cfg := a.store.Load()
 		id, pass, _ := a.store.Credentials()
-		if id == "" || pass == "" {
+		ticket, err := a.ledger.claim(time.Now(), cfg, accountKey(id), id != "" && pass != "", a.running.Load())
+		if err != nil {
+			a.log.Add("定时槽位保存失败，本槽位不执行：" + err.Error())
 			continue
 		}
-		now := time.Now()
-		hm := now.Format("15:04")
-		matched := false
-		for _, tt := range cfg.Times {
-			if tt == hm {
-				matched = true
-				break
-			}
-		}
-		if !matched || now.Format("2006-01-02")+" "+hm == a.lastRunDate+" "+a.lastRunTime {
+		if ticket == nil {
 			continue
 		}
-		// a little jitter so the sign-in never lands on the exact minute —
-		// it should look like a person tapping at a random moment
-		if d := time.Duration(rand.Intn(90)) * time.Second; d > 0 {
-			time.Sleep(d)
-		}
-		res := a.runOnce(context.Background(), false)
-		a.lastRunDate, a.lastRunTime = now.Format("2006-01-02"), hm
-		a.m.setResult(res.OK, res.Neutral, res.Reason)
-		if res.OK {
-			// done for today — no need to hit the later slots
-			a.lastRunDate = now.Format("2006-01-02")
-			a.lastRunTime = "23:59"
-		}
+		time.Sleep(time.Duration(rand.Intn(90)) * time.Second)
+		a.runAttempt(context.Background(), false, ticket)
 	}
 }
 
 func (a *app) runOnce(ctx context.Context, manual bool) signin.Result {
+	return a.runAttempt(ctx, manual, nil)
+}
+
+func (a *app) runAttempt(ctx context.Context, manual bool, ticket *scheduleTicket) signin.Result {
 	if !a.running.CompareAndSwap(false, true) {
 		return signin.Result{Neutral: true, Reason: "签到正在运行，已忽略重复请求"}
 	}
-	defer a.running.Store(false)
+	defer func() {
+		a.running.Store(false)
+		a.post(func() { a.syncTray() })
+	}()
 	cfg := a.store.Load()
+	id, pass, credErr := a.store.Credentials()
+	started := time.Now()
+	account, date := accountKey(id), started.Format("2006-01-02")
+	if !manual && !a.ledger.eligible(ticket, started, cfg, account, credErr == nil && id != "" && pass != "", false) {
+		return signin.Result{Neutral: true, Reason: "定时条件已变化，已跳过本槽位"}
+	}
+	var setupErr error
+	cfg, setupErr = accountSettings(cfg, id, pass, credErr)
+	if setupErr != nil {
+		res := signin.Result{Reason: setupErr.Error(), Exit: 9}
+		a.log.Add("签到启动前检查失败：" + res.Reason)
+		a.post(func() {
+			a.syncTray()
+			if a.m.statusAccount == account && a.m.statusDate == date {
+				a.m.setResult(res.OK, res.Neutral, res.Reason)
+			}
+		})
+		return res
+	}
+	a.post(func() { a.syncTray() })
 	r := &signin.Runner{
 		Cfg:     cfg,
 		Log:     a.log.Add,
 		Notify:  a.notify,
 		ShotDir: filepath.Join(baseDir(), "shots"),
 		Solver:  a.solver,
-		Creds: func() (string, string, error) {
-			id, pass, err := a.store.Credentials()
-			return id, pass, err
-		},
+		// Freeze the attempted identity: a settings edit during login must not
+		// attribute the result to a different account.
+		Creds: func() (string, string, error) { return id, pass, credErr },
 	}
 	a.log.Add(fmt.Sprintf("======== 签到开始（%s，触发=%s）========", nowHM(), map[bool]string{true: "手动", false: "定时"}[manual]))
 	res := r.Run(ctx, manual)
@@ -218,6 +222,19 @@ func (a *app) runOnce(ctx context.Context, manual bool) signin.Result {
 		mark = fmt.Sprintf("未完成(exit %d)", res.Exit)
 	}
 	a.log.Add(fmt.Sprintf("======== 结束：%s | %s ========", mark, res.Reason))
+	if res.OK {
+		if err := a.ledger.confirm(account, date); err != nil {
+			a.log.Add("今日成功状态保存失败（本次运行仍停止自动重试，重启后可能无法恢复）：" + err.Error())
+		}
+	}
+	a.post(func() {
+		a.syncTray()
+		// A queued completion from yesterday or another account must not
+		// overwrite the current account's notice.
+		if a.m.statusAccount == account && a.m.statusDate == date {
+			a.m.setResult(res.OK, res.Neutral, res.Reason)
+		}
+	})
 	return res
 }
 
@@ -232,16 +249,7 @@ func (a *app) signNow() {
 		a.post(func() { a.syncTray() })
 		return
 	}
-	go func() {
-		res := a.runOnce(context.Background(), true)
-		a.post(func() {
-			a.m.setResult(res.OK, res.Neutral, res.Reason)
-			a.syncTray()
-			if a.win != nil && !a.win.IsDestroyed() {
-				a.win.Invalidate()
-			}
-		})
-	}()
+	go a.runOnce(context.Background(), true)
 }
 
 func (a *app) setAutoSign(on bool) {
@@ -402,11 +410,15 @@ func (a *app) makeTray() {
 // and idle the star breathes (bright ⇄ dark gold every 1.5s) so the user
 // can tell the program is alive — it covers ~99% of the time.
 func (a *app) syncTray() {
+	id, pass, _ := a.store.Credentials()
+	now := time.Now()
+	account := accountKey(id)
+	a.m.cfg = a.store.Load()
+	a.m.syncSuccess(account, now, pass != "" && a.ledger.succeeded(account, now))
 	if a.tray == nil {
 		return
 	}
 	mac := runtime.GOOS == "darwin"
-	id, pass, _ := a.store.Credentials()
 	label := "未配置账号 —— 请打开主窗口填写"
 	state := art.TrayOff
 	a.breathe = false
