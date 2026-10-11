@@ -1,0 +1,69 @@
+# ============================================================
+#  宿舍查寝自动签到 —— 请勿提交运行数据与个人隐私
+# ============================================================
+
+# ---- 最危险: 浏览器配置目录(内含登录 Cookie, 等同登录凭证) ----
+edge-userdata/
+edge-userdata-*/
+*/edge-userdata/
+**/edge-userdata/
+
+# ---- 你的真实配置(坐标等) —— 只提交 config.example.json ----
+config.json
+
+# ---- 运行日志与证据(可能含姓名/班级/手机号/页面文本) ----
+signin.log
+signin.log.*
+*.log
+shots/
+session-history.csv
+session-history*.csv
+
+# ---- 各类报告与提示文件 ----
+自检报告.txt
+重部署报告.txt
+监控报告-*.txt
+监控报告*.txt
+需要人工登录.txt
+需要人工签到.txt
+*报告*.txt
+*result*.txt
+prewarm.flag
+
+# ---- 打包/交付产物 ----
+*.zip
+交付版*/
+github-release/
+
+# ---- 训练与调参产生的临时数据 ----
+*-real.cache
+corpus/
+shots/captcha/
+
+# ---- 私有笔记 / 交接文档(可能含个人信息) ----
+AGENT-HANDOFF*.md
+明天继续-状态交接.md
+_记忆存档*.md
+开发报告*.md
+迁移指南.md
+交付说明.md
+
+# ---- 系统与编辑器 ----
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+~$*
+
+# ---- Go / mygo ----
+build/
+*.syso
+*.test
+
+# 调试/监测临时文件
+.tmp-*/
+monitor-page.*
+edge-debug.log
+edge-diag*
+monitor-profile/

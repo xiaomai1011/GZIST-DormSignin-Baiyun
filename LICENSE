@@ -1,0 +1,38 @@
+MIT License
+
+Copyright (c) 2026 skylinejoin (original PS project)
+Copyright (c) 2026 xiaomai1011 (Go rewrite, Baiyun campus)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+ADDITIONAL NOTICE / 附加声明 (使用前提, 优先于上述许可)
+
+This license covers copyright in the code ONLY. It does NOT exempt any user
+from complying with their institution's rules and applicable laws.
+
+本许可仅涉及代码版权，不免除使用者遵守所在学校规章制度与法律法规的义务。
+
+本项目仅允许用于「本人账号 + 本人确实身处宿舍」的场景：
+  1. 不得替他人签到、代签、批量签到；
+  2. 人不在宿舍/不在学校时，不得使用定位注入伪造在场记录；
+  3. 不得用于绕过、对抗学校考勤制度或信息系统安全机制。
+
+使用者自行承担全部后果（包括但不限于纪律处分、账号封禁）。
+详见 README.md 中的免责声明 —— 该声明是本项目的使用前提。
