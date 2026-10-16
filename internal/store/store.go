@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/zalando/go-keyring"
 )
@@ -99,6 +100,8 @@ func (osKeyring) Delete(s, u string) error        { return keyring.Delete(s, u) 
 type Store struct {
 	Dir     string
 	Keyring Keyring
+	// A Store must not be copied after first use.
+	credentialsMu sync.RWMutex
 }
 
 func New(dir string) *Store { return &Store{Dir: dir, Keyring: osKeyring{}} }
@@ -130,6 +133,8 @@ func (s *Store) Save(st Settings) error {
 
 // Credentials returns the student ID and password ("", "", nil) when unset.
 func (s *Store) Credentials() (id, pass string, err error) {
+	s.credentialsMu.RLock()
+	defer s.credentialsMu.RUnlock()
 	id, err = s.Keyring.Get(service, idUser)
 	if err != nil {
 		id = s.readFile(idUser + ".txt")
@@ -143,6 +148,8 @@ func (s *Store) Credentials() (id, pass string, err error) {
 
 // SetCredentials stores both values; insecure reports the file fallback.
 func (s *Store) SetCredentials(id, pass string) (insecure bool, err error) {
+	s.credentialsMu.Lock()
+	defer s.credentialsMu.Unlock()
 	insecure = false
 	if err := s.Keyring.Set(service, idUser, id); err != nil {
 		if e := s.writeFile(idUser+".txt", id); e != nil {
@@ -177,6 +184,8 @@ func (s *Store) writeFile(name, val string) error {
 
 // DeleteCredentials forgets both values.
 func (s *Store) DeleteCredentials() {
+	s.credentialsMu.Lock()
+	defer s.credentialsMu.Unlock()
 	s.Keyring.Delete(service, idUser)
 	s.Keyring.Delete(service, pwUser)
 	os.Remove(filepath.Join(s.Dir, idUser+".txt"))

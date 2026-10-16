@@ -116,11 +116,11 @@ func TestWaitBusinessPageCancellationAndBlockedProbe(t *testing.T) {
 func TestWaitBusinessPageErrorReason(t *testing.T) {
 	_, elapsed, err := waitBusinessPage(context.Background(), 20*time.Millisecond, time.Millisecond,
 		func(context.Context) (pageState, error) { return pageState{}, errors.New("CDP probe failed") }, nil)
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "CDP probe failed") {
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "operation-failed") {
 		t.Fatal(err)
 	}
 	result := pageWaitFailure(elapsed, err)
-	if strings.Contains(result.Reason, "120s") || !strings.Contains(result.Reason, "实际耗时") || !strings.Contains(result.Reason, "CDP probe failed") {
+	if strings.Contains(result.Reason, "120s") || !strings.Contains(result.Reason, "实际耗时") || !strings.Contains(result.Reason, "operation-failed") {
 		t.Fatal(result)
 	}
 }
@@ -214,7 +214,7 @@ func TestWaitBusinessPageRepairAtMostOnce(t *testing.T) {
 			repairs++
 			return errors.New("route repair failed")
 		})
-	if repairs != 1 || elapsed < 3100*time.Millisecond || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "route repair failed") {
+	if repairs != 1 || elapsed < 3100*time.Millisecond || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "operation-failed") {
 		t.Fatalf("repairs=%d elapsed=%v err=%v", repairs, elapsed, err)
 	}
 }

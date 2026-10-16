@@ -1,7 +1,7 @@
 {
   "name": "GZIST DormSignin",
   "identifier": "io.github.xiaomai1011.gzist-dormsignin",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "copyright": "Copyright © 2026 xiaomai1011. Upstream © skylinejoin. MIT License.",
   "out": "build"
 }

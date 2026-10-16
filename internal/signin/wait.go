@@ -40,7 +40,7 @@ type pageState struct {
 // A slow shell is not evidence of a broken page. Only repair a known missing
 // route, never reload based on elapsed time or the absence of a sign-in card.
 func pageWaitPolicy(s pageState, elapsed time.Duration, repaired bool) (ready, repair bool) {
-	if strings.Contains(s.Text, "查寝时间段") && strings.Contains(s.Text, "点击签到") || strings.Contains(s.Text, "无需重复签到") {
+	if schoolURL(s.URL, "xsfw.gzist.edu.cn") && ((strings.Contains(s.Text, "查寝时间段") && strings.Contains(s.Text, "点击签到")) || hitKeyword(s.Text) != "") {
 		return true, false
 	}
 	u, err := url.Parse(s.URL)
@@ -80,7 +80,7 @@ func waitBusinessPage(ctx context.Context, budget, poll time.Duration,
 			return last, 0, fmt.Errorf("%w；%s", context.Cause(waitCtx), detail)
 		}
 		if probeErr != nil {
-			detail = "最近一次页面读取错误: " + probeErr.Error()
+			detail = "最近一次页面读取错误: " + safeDiagnosticError(probeErr)
 		} else {
 			last = s
 			ready, fix := pageWaitPolicy(s, time.Since(start), repaired)
@@ -90,7 +90,7 @@ func waitBusinessPage(ctx context.Context, budget, poll time.Duration,
 			if fix {
 				repaired = true // An unsuccessful attempt must not trigger a retry loop.
 				if repairErr := repair(waitCtx); repairErr != nil {
-					detail = "路由修复失败: " + repairErr.Error()
+					detail = "路由修复失败: " + safeDiagnosticError(repairErr)
 				} else {
 					detail = "已尝试一次路由修复，仍未出现查寝内容"
 				}

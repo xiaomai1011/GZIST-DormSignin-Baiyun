@@ -24,6 +24,8 @@ var (
 )
 
 type actions struct {
+	Verify       func(id, pass string)
+	CancelVerify func()
 	Save         func(id, pass string)
 	Sign         func()
 	SetHoliday   func(on bool)
@@ -33,6 +35,7 @@ type actions struct {
 }
 
 type model struct {
+	loginUIState
 	cfg                  store.Settings
 	studentID            string
 	id, pass             string // echoed from the store at startup
@@ -146,6 +149,7 @@ func (m *model) view(c *ui.Context) {
 	title, line, col, _ := m.statusLine()
 	ui.Column(c).Fill().Children(func() {
 		m.header(c, t)
+		m.authBanner(c)
 		ui.Scroll(c).Grow(1).Children(func() {
 			ui.Column(c).Padding(14).Gap(12).Children(func() {
 				m.statusCard(c, t, title, line, col)
@@ -279,6 +283,7 @@ func mustMark(must bool) string {
 }
 
 func (m *model) accountCard(c *ui.Context, t *ui.Theme) {
+	oldID, oldPass := m.id, m.pass
 	card(c, t).Children(func() {
 		sectionTitle(c, t, "账号", colGold)
 		ui.TextInput(c, &m.id).Label("学号").Placeholder("学号").FillWidth()
@@ -296,6 +301,9 @@ func (m *model) accountCard(c *ui.Context, t *ui.Theme) {
 			pw.Placeholder(placeholder)
 			submitted = pw.Submitted()
 		}
+		if oldID != m.id || oldPass != m.pass {
+			m.credentialsEdited()
+		}
 		eye := "👁 显示"
 		if m.showPass {
 			eye = "🙈 隐藏"
@@ -305,13 +313,37 @@ func (m *model) accountCard(c *ui.Context, t *ui.Theme) {
 				m.showPass = !m.showPass
 			}
 		})
-		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, m.notice).FontSize(12).TextColor(t.TextMuted).Grow(1).Wrap()
+		ui.Row(c).Gap(10).AlignItems(ui.Center).FillWidth().Children(func() {
+			label := "验证登录"
+			if m.verifying {
+				label = "验证中…"
+			}
+			if ui.PrimaryButton(c, label).Disabled(m.verifying || m.cleanupWarning || strings.TrimSpace(m.id) == "" || m.pass == "").Clicked() {
+				m.act.Verify(m.id, m.pass)
+			}
+			if m.verifying && ui.Button(c, "取消验证").Disabled(m.verifyCanceled).Clicked() {
+				m.act.CancelVerify()
+			}
 			dirty := m.id != m.storedID || m.pass != m.storedPass
-			if (ui.PrimaryButton(c, "保存").Disabled(!dirty || m.id == "").Clicked() || (submitted && dirty)) && m.id != "" {
+			if (ui.Button(c, "保存").Disabled(m.saving || !dirty || m.id == "").Clicked() || (submitted && dirty)) && m.id != "" && !m.saving {
 				m.act.Save(m.id, m.pass)
 			}
 		})
+		ui.Text(c, "验证只检查当前输入，不签到，也不会自动保存。").FontSize(11.5).TextColor(t.TextMuted).Wrap()
+		if m.verifyMessage != "" {
+			// The presentation follows the structured outcome: a blue box for an
+			// unclassified or interrupted verification, a green box for success,
+			// ordinary secondary text for everything the top banner already
+			// carries. Colour never depends on the wording of the message.
+			if box := m.verifyBox(); box.Tone == verifyTonePlain {
+				ui.Text(c, m.verifyMessage).FontSize(12).TextColor(t.TextMuted).Wrap()
+			} else {
+				verifyResultBox(c, t, box)
+			}
+		}
+		if m.notice != "" {
+			ui.Text(c, m.notice).FontSize(12).TextColor(t.TextMuted).Wrap()
+		}
 	})
 }
 

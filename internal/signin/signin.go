@@ -10,6 +10,7 @@ package signin
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image/png"
 	"os"
@@ -17,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 
 	"github.com/xiaomai1011/GZIST-DormSignin-Baiyun/internal/captcha"
@@ -29,10 +29,11 @@ import (
 // comparable: 0 ok / already signed, 3 need human, 5 config, 7 location,
 // 8 time guard, 9 no browser.
 type Result struct {
-	OK      bool
-	Reason  string
-	Exit    int
-	Neutral bool // an expected non-run (off-hours / past late-line) — not an error
+	AuthIssue AuthIssue
+	OK        bool
+	Reason    string
+	Exit      int
+	Neutral   bool // an expected non-run (off-hours / past late-line) — not an error
 }
 
 type Runner struct {
@@ -120,8 +121,8 @@ func (r *Runner) Run(ctx context.Context, manual bool) Result {
 		if err := sleepCtx(ctx, 300*time.Millisecond); err != nil {
 			return canceledResult(ctx)
 		}
-		host, title := hostTitle(ctx)
-		if strings.Contains(host, "xsfw.gzist.edu.cn") || strings.Contains(title, "个人查寝") {
+		state, probeErr := probePage(ctx)
+		if probeErr == nil && schoolURL(state.URL, "xsfw.gzist.edu.cn") {
 			loginOK = true
 			break
 		}
@@ -176,24 +177,39 @@ func (r *Runner) Run(ctx context.Context, manual bool) Result {
 		if ctx.Err() != nil {
 			return canceledResult(ctx)
 		}
-		r.log("  !! 页面未就绪。最后观测 URL: " + last.URL)
-		r.log("  !! 最后观测页面文本: " + clampText(last.Text, 500))
-		res := pageWaitFailure(elapsed, waitErr)
-		r.log("  !! " + res.Reason)
-		// No extra browser work after caller cancellation. Diagnostics are bounded,
-		// and the result does not claim that a screenshot was saved if it failed.
-		if ctx.Err() == nil {
-			shotCtx, cancelShot := context.WithTimeout(ctx, 3*time.Second)
-			r.saveShot(shotCtx, "step6-timeout")
-			cancelShot()
+		r.log("  !! 页面未就绪。最后观测 URL: " + safePageURL(last.URL))
+		r.log(fmt.Sprintf("  !! 最后观测页面文本长度: %d", len(last.Text)))
+		r.log("  !! " + pageWaitFailure(elapsed, waitErr).Reason)
+		last, elapsed, waitErr = r.recoverStep6(ctx, deadline, last, elapsed, waitErr)
+		if ctx.Err() != nil {
+			return canceledResult(ctx)
 		}
-		return res
+		if errors.Is(waitErr, errLateLine) {
+			return Result{Reason: errLateLine.Error(), Exit: 8, Neutral: true}
+		}
+		if waitErr != nil {
+			if res, ok := resultForRecovery(waitErr); ok {
+				return res
+			}
+			res := pageWaitFailure(elapsed, waitErr)
+			r.log("  !! " + res.Reason)
+			return res
+		}
+	}
+	// An already-confirmed success must not be lost to a later read or geo reload.
+	if hit := hitKeyword(last.Text); hit != "" {
+		r.log(">>> " + hit)
+		return Result{OK: true, Reason: "今日已签到，无需再签"}
 	}
 	r.log(fmt.Sprintf("  步骤6: 页面就绪 ✓（耗时 %.1fs）", elapsed.Seconds()))
 	if err := sleepCtx(ctx, 800*time.Millisecond); err != nil {
 		return canceledResult(ctx)
 	}
 	txt := pageText(ctx)
+	if hit := hitKeyword(txt); hit != "" {
+		r.log(">>> " + hit)
+		return Result{OK: true, Reason: "今日已签到，无需再签"}
+	}
 	r.log("  定位校验: " + geoVerdict(txt))
 
 	// ---- step 6.5: geo verdict repair (original 2026-09-28 fix) ----
@@ -211,6 +227,10 @@ func (r *Runner) Run(ctx context.Context, manual bool) Result {
 				return canceledResult(ctx)
 			}
 			txt = pageText(ctx)
+			if hit := hitKeyword(txt); hit != "" {
+				r.log(">>> " + hit)
+				return Result{OK: true, Reason: "今日已签到，无需再签"}
+			}
 			if strings.Contains(txt, "点击签到") {
 				break
 			}
@@ -289,7 +309,7 @@ func (r *Runner) Run(ctx context.Context, manual bool) Result {
 			return canceledResult(ctx)
 		}
 		if observeErr != nil {
-			r.log("  点击后未确认成功。最后页面文本: " + clampText(after, 500))
+			r.log(fmt.Sprintf("  点击后未确认成功。最后页面文本长度: %d", len(after)))
 			return Result{Reason: "点击后30秒内未确认成功，本轮不重复提交（详见日志）", Exit: 5}
 		}
 		signOK = true
@@ -337,6 +357,12 @@ func (r *Runner) autoLogin(ctx context.Context, loginOK *bool) Result {
 		{"#userName", id},
 		{"#password", pass},
 	} {
+		if ctx.Err() != nil {
+			return canceledResult(ctx)
+		}
+		if ready, err := formReady(ctx); err != nil || !ready {
+			return Result{Reason: "登录页面或表单不再可信，停止自动登录", Exit: 3}
+		}
 		if !setReactValue(ctx, f.sel, f.val) {
 			r.log("  填写 " + f.sel + " 失败")
 			return Result{}
@@ -352,9 +378,22 @@ func (r *Runner) autoLogin(ctx context.Context, loginOK *bool) Result {
 		thr = 0.55
 	}
 	for try := 1; try <= capMax && !*loginOK; try++ {
+		if ctx.Err() != nil {
+			return canceledResult(ctx)
+		}
+		if ready, err := formReady(ctx); err != nil || !ready {
+			return Result{Reason: "登录页面或表单不再可信，停止自动登录", Exit: 3}
+		}
+		if issue := terminalDOMAuth(ctx); issue != AuthNone {
+			return authResult(issue)
+		}
+
 		du := extractLoginCaptcha(ctx)
 		if du == "" || du == "WAIT" || strings.HasPrefix(du, "ERR:") {
 			r.log(fmt.Sprintf("  [%d/%d] 验证码图提取失败 -> 刷新重试", try, capMax))
+			if try >= capMax {
+				break
+			}
 			refreshLoginCaptcha(ctx)
 			if err := sleepCtx(ctx, 600*time.Millisecond); err != nil {
 				return canceledResult(ctx)
@@ -368,6 +407,9 @@ func (r *Runner) autoLogin(ctx context.Context, loginOK *bool) Result {
 				det = fmt.Sprintf("置信度低(%.3f)", res.MinScore)
 			}
 			r.log(fmt.Sprintf("  [%d/%d] 识别不可信(%s) -> 换一张, 绝不瞎填", try, capMax, det))
+			if try >= capMax {
+				break
+			}
 			refreshLoginCaptcha(ctx)
 			if err := sleepCtx(ctx, 600*time.Millisecond); err != nil {
 				return canceledResult(ctx)
@@ -376,14 +418,22 @@ func (r *Runner) autoLogin(ctx context.Context, loginOK *bool) Result {
 		}
 		r.log(fmt.Sprintf("  [%d/%d] 识别: %s = %s（置信度 %.3f/余量 %.3f）",
 			try, capMax, res.Expr, res.Ans, res.MinScore, res.MinMargin))
-		x, y := selCenter(ctx, "#captcha")
-		dispatchMouseClick(ctx, x, y)
+		// Guard and mutate the CAS input in one page evaluation; no stale
+		// mouse coordinates can spill onto a newly redirected business page.
+		if !setReactValue(ctx, "#captcha", res.Ans) {
+			return Result{Reason: "登录验证码表单不再可信，停止自动登录", Exit: 3}
+		}
 		if err := sleepCtx(ctx, 250*time.Millisecond); err != nil {
 			return canceledResult(ctx)
 		}
-		_ = input.InsertText(res.Ans).Do(exec(ctx))
-		if err := sleepCtx(ctx, 250*time.Millisecond); err != nil {
+		if ctx.Err() != nil {
 			return canceledResult(ctx)
+		}
+		if ready, err := formReady(ctx); err != nil || !ready {
+			return Result{Reason: "登录页面或表单不再可信，停止自动登录", Exit: 3}
+		}
+		if issue := terminalDOMAuth(ctx); issue != AuthNone {
+			return authResult(issue)
 		}
 		clickLoginButton(ctx)
 		deadlineL := time.Now().Add(10 * time.Second)
@@ -391,8 +441,11 @@ func (r *Runner) autoLogin(ctx context.Context, loginOK *bool) Result {
 			if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
 				return canceledResult(ctx)
 			}
-			host, title := hostTitle(ctx)
-			if strings.Contains(host, "xsfw.gzist.edu.cn") || strings.Contains(title, "个人查寝") {
+			if issue := terminalDOMAuth(ctx); issue != AuthNone {
+				return authResult(issue)
+			}
+			state, probeErr := probePage(ctx)
+			if probeErr == nil && schoolURL(state.URL, "xsfw.gzist.edu.cn") {
 				*loginOK = true
 				r.log(fmt.Sprintf("  自动登录成功 ✓（第 %d 次尝试）", try))
 				break
@@ -402,6 +455,9 @@ func (r *Runner) autoLogin(ctx context.Context, loginOK *bool) Result {
 			break
 		}
 		r.log(fmt.Sprintf("  [%d/%d] 提交后未跳转(验证码可能不对)", try, capMax))
+		if try >= capMax {
+			break
+		}
 		refreshLoginCaptcha(ctx)
 		if err := sleepCtx(ctx, 600*time.Millisecond); err != nil {
 			return canceledResult(ctx)
@@ -437,7 +493,11 @@ func hostTitle(ctx context.Context) (host, title string) {
 
 func formReady(ctx context.Context) (bool, error) {
 	var v int
-	err := chromedp.Evaluate(`(function(){var u=document.querySelector('#userName'),p=document.querySelector('#password');if(!u||!p)return 0;var ru=u.getBoundingClientRect(),rp=p.getBoundingClientRect();return (ru.width>0&&rp.width>0)?1:0})()`, &v).Do(exec(ctx))
+	err := chromedp.Evaluate(`(function(){`+casPageGuardJS+`
+ var u=document.querySelector('#userName'),p=document.querySelector('#password');
+ function visible(e){if(!e||e.disabled)return false;var r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&s.visibility!=='collapse'&&s.opacity!=='0';}
+ return visible(u)&&visible(p)?1:0;
+ })()`, &v).Do(exec(ctx))
 	return v == 1, err
 }
 
@@ -445,7 +505,7 @@ func formReady(ctx context.Context) (bool, error) {
 // value setter + an input event (from the original HandleSignCaptcha).
 func setReactValue(ctx context.Context, sel, val string) bool {
 	var ok int
-	expr := fmt.Sprintf(`(function(){
+	expr := fmt.Sprintf(`(function(){`+casPageGuardJS+`
   var e=document.querySelector('%s');if(!e)return 0;
   var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
   setter.call(e,%q); e.dispatchEvent(new Event('input',{bubbles:true}));
@@ -471,22 +531,58 @@ func extractLoginCaptcha(ctx context.Context) string {
 	return du
 }
 
+// casVisibleFnJS defines visible() only. Callers decide their own return codes;
+// sharing the definition keeps the visibility rules identical everywhere.
+const casVisibleFnJS = `
+function visible(e){if(!e||e.disabled)return false;var r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&s.visibility!=='collapse'&&s.opacity!=='0';}
+`
+const casVisibleFormJS = `
+var u=document.querySelector('#userName'),p=document.querySelector('#password');
+` + casVisibleFnJS + `if(!visible(u)||!visible(p))return 0;
+`
+const refreshLoginCaptchaJS = `(function(){` + casPageGuardJS + casVisibleFormJS + `
+var i=document.querySelector('img[src^="data:image"]');if(!visible(i))return 0;i.click();return 1;
+})()`
+
 func refreshLoginCaptcha(ctx context.Context) {
-	x, y := selCenter(ctx, `img[src^="data:image"]`)
-	if x >= 0 {
-		dispatchMouseClick(ctx, x, y)
+	if ctx.Err() != nil {
+		return
 	}
-	chromedp.Evaluate(`(function(){var i=document.querySelector('img[src^="data:image"]');if(i){try{i.dispatchEvent(new MouseEvent('click',{bubbles:true}))}catch(e){}}})()`, nil).Do(exec(ctx))
+	chromedp.Evaluate(refreshLoginCaptchaJS, nil).Do(exec(ctx))
 }
 
+const clickLoginButtonJS = `(function(){` + casPageGuardJS + casVisibleFormJS + `
+var b=[].filter.call(document.querySelectorAll('button'),function(x){return (x.innerText||'').replace(/\s+/g,'')==='登录'})[0];
+if(!b)b=document.querySelector('button.ant-btn-primary');if(!visible(b))return 0;b.click();return 1;
+})()`
+
+// verifyClickLoginJS is the verification-only click. It shares casPageGuardJS
+// with the sign-in path (which keeps "0 = not the trusted CAS login page") but
+// reports the remaining DOM outcomes separately, so a failed click can be
+// explained instead of collapsing into one anonymous unknown.
+//
+//	0 = not the trusted CAS login page
+//	1 = clicked
+//	3 = credentials form missing or not visible
+//	4 = login button not found
+//	5 = login button not visible or disabled
+//	6 = click threw
+const verifyClickLoginJS = `(function(){` + casPageGuardJS + casVisibleFnJS + `
+var u=document.querySelector('#userName'),p=document.querySelector('#password');
+if(!visible(u)||!visible(p))return 3;
+var b=[].filter.call(document.querySelectorAll('button'),function(x){return (x.innerText||'').replace(/\s+/g,'')==='登录'})[0];
+if(!b)b=document.querySelector('button.ant-btn-primary');
+if(!b)return 4;
+if(!visible(b))return 5;
+try{b.click();}catch(e){return 6;}
+return 1;
+})()`
+
 func clickLoginButton(ctx context.Context) {
-	// by visible text 「登录」, then by ant-design primary class —
-	// CSS class names carry hashes, so text comes first (as the original).
-	var pt []float64
-	chromedp.Evaluate(`(function(){var b=[].filter.call(document.querySelectorAll('button'),function(x){return (x.innerText||'').replace(/\s+/g,'')==='登录'})[0];if(!b)b=document.querySelector('button.ant-btn-primary');if(!b)return null;var r=b.getBoundingClientRect();if(!(r.width>0))return null;return [r.x+r.width/2, r.y+r.height/2]})()`, &pt).Do(exec(ctx))
-	if len(pt) == 2 {
-		dispatchMouseClick(ctx, pt[0], pt[1])
+	if ctx.Err() != nil {
+		return
 	}
+	chromedp.Evaluate(clickLoginButtonJS, nil).Do(exec(ctx))
 }
 
 func geoVerdict(txt string) string {

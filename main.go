@@ -32,7 +32,7 @@ import (
 const appTitle = "GZIST DormSignin"
 
 // Identifies this local repair even before a release tag is created.
-const repairBuild = "daily-ledger-20261011-r3"
+const repairBuild = "verify-diag-r6"
 
 func buildIdentity() string {
 	parts := []string{"修复构建: " + repairBuild}
@@ -47,6 +47,7 @@ func buildIdentity() string {
 }
 
 type app struct {
+	loginController
 	log    *applog.Log
 	store  *store.Store
 	m      *model
@@ -130,6 +131,8 @@ func (a *app) ready() {
 		version:    mygo.App.Version(),
 	}
 	a.m.act = actions{
+		Verify:       a.verifyLogin,
+		CancelVerify: a.cancelLoginVerification,
 		Save:         a.save,
 		Sign:         a.signNow,
 		SetHoliday:   a.setHoliday,
@@ -159,7 +162,7 @@ func (a *app) scheduleLoop() {
 		a.post(func() { a.syncTray() })
 		cfg := a.store.Load()
 		id, pass, _ := a.store.Credentials()
-		ticket, err := a.ledger.claim(time.Now(), cfg, accountKey(id), id != "" && pass != "", a.running.Load())
+		ticket, err := a.claimScheduled(time.Now(), cfg, accountKey(id), id != "" && pass != "")
 		if err != nil {
 			a.log.Add("定时槽位保存失败，本槽位不执行：" + err.Error())
 			continue
@@ -177,8 +180,9 @@ func (a *app) runOnce(ctx context.Context, manual bool) signin.Result {
 }
 
 func (a *app) runAttempt(ctx context.Context, manual bool, ticket *scheduleTicket) signin.Result {
-	if !a.running.CompareAndSwap(false, true) {
-		return signin.Result{Neutral: true, Reason: "签到正在运行，已忽略重复请求"}
+	if !a.acquireOperation(ticket != nil) {
+		a.post(func() { a.m.notice = "签到或登录验证正在运行／即将开始，请稍后。" })
+		return signin.Result{Neutral: true, Reason: "签到或登录验证正在运行／即将开始，已忽略重复请求"}
 	}
 	defer func() {
 		a.running.Store(false)
@@ -230,9 +234,13 @@ func (a *app) runAttempt(ctx context.Context, manual bool, ticket *scheduleTicke
 	a.post(func() {
 		a.syncTray()
 		// A queued completion from yesterday or another account must not
-		// overwrite the current account's notice.
+		// overwrite the current account's notice or credential warning.
 		if a.m.statusAccount == account && a.m.statusDate == date {
 			a.m.setResult(res.OK, res.Neutral, res.Reason)
+			currentID, currentPass, err := a.store.Credentials()
+			if err == nil {
+				a.m.applySignInAuthentication(res, credentialIdentity(id, pass), credentialIdentity(currentID, currentPass))
+			}
 		}
 	})
 	return res
@@ -240,7 +248,7 @@ func (a *app) runAttempt(ctx context.Context, manual bool, ticket *scheduleTicke
 
 func (a *app) signNow() {
 	if a.running.Load() {
-		a.m.notice = "签到正在运行…"
+		a.m.notice = "签到或登录验证正在运行…"
 		return
 	}
 	id, pass, _ := a.store.Credentials()
@@ -300,6 +308,9 @@ func (a *app) setAutostart(on bool) {
 
 // save writes credentials and merges UI-visible settings.
 func (a *app) save(id, pass string) {
+	if a.m.saving {
+		return
+	}
 	if id == "" {
 		a.m.notice = "学号不能为空"
 		return
@@ -308,6 +319,7 @@ func (a *app) save(id, pass string) {
 		a.m.notice = "第一次设置请同时填写密码"
 		return
 	}
+	a.m.saving = true
 	a.m.notice = "保存中…"
 	a.post(func() {})
 	go func() {
@@ -316,7 +328,7 @@ func (a *app) save(id, pass string) {
 			a.log.Add("账号已清除")
 		} else {
 			if insecure, err := a.store.SetCredentials(id, pass); err != nil {
-				a.post(func() { a.m.notice = "保存失败：" + err.Error() })
+				a.post(func() { a.m.saving = false; a.m.notice = "保存失败：" + err.Error() })
 				return
 			} else if insecure {
 				a.log.Add("系统凭据管理器不可用，密码以明文（权限 0600）保存在本机")
@@ -324,8 +336,7 @@ func (a *app) save(id, pass string) {
 			a.log.Printf("账号已保存（学号=%s）", id)
 		}
 		a.post(func() {
-			a.m.studentID, a.m.hasCreds = id, pass != ""
-			a.m.notice = "已保存"
+			a.m.finishCredentialSave(id, pass)
 			a.syncTray()
 		})
 	}()
@@ -423,6 +434,12 @@ func (a *app) syncTray() {
 	state := art.TrayOff
 	a.breathe = false
 	switch {
+	case a.operationBlocked.Load():
+		label, state = "浏览器清理异常，请重启程序", art.TrayOff
+	case a.m.verifying:
+		label, state = "登录验证中（不签到）…", art.TrayBusy
+	case a.m.authIssue == signin.AuthCredentialsRejected || a.m.authIssue == signin.AuthLocked:
+		label, state = "账号认证异常，请打开窗口处理", art.TrayOff
 	case a.m.cfg.Holiday:
 		label = "假期模式（已停用）"
 	case id == "" || pass == "":
@@ -437,7 +454,7 @@ func (a *app) syncTray() {
 		a.breathe = true
 	}
 	a.menu.ItemByID("status").SetLabel(label)
-	a.menu.ItemByID("sign").SetEnabled(!a.running.Load() && !a.m.cfg.Holiday)
+	a.menu.ItemByID("sign").SetEnabled(!a.running.Load() && !a.operationBlocked.Load() && !a.m.cfg.Holiday)
 	a.menu.ItemByID("holiday").SetChecked(a.m.cfg.Holiday)
 	a.tray.SetToolTip(appTitle + " · 白云校区 · " + label)
 	if !a.breathe {
