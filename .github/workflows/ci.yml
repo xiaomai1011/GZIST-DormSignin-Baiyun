@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: "0"
+      GOFLAGS: -mod=readonly
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: mygo vet (UI 规则)
+        run: go tool mygo vet .
+      - name: Test
+        run: go test ./...
+      - name: go.mod / go.sum 必须未被改写
+        run: git diff --exit-code -- go.mod go.sum
