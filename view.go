@@ -1,6 +1,6 @@
 // The look follows MyGO!!!!! with 长崎爽世's gold as the app identity:
 // gold tray star, gold accents — the third color after the blue
-// NetKeeper star and the green Hotspot star. 白云校区专属.
+// NetKeeper star and the green Hotspot star. 学校统一认证.
 package main
 
 import (
@@ -31,11 +31,19 @@ type actions struct {
 	SetHoliday   func(on bool)
 	SetAutoSign  func(on bool)
 	SetAutostart func(on bool)
+	SetResident  func(on bool)
+	ShowBrowser  func()
+	HideBrowser  func()
 	OpenLogs     func()
+	CheckUpdate  func()
+	OpenRelease  func()
 }
 
 type model struct {
 	loginUIState
+	updateUIState
+	windowBusy           bool
+	windowMessage        string
 	cfg                  store.Settings
 	studentID            string
 	id, pass             string // echoed from the store at startup
@@ -155,6 +163,7 @@ func (m *model) view(c *ui.Context) {
 				m.statusCard(c, t, title, line, col)
 				m.accountCard(c, t)
 				m.switches(c, t)
+				m.updateCard(c, t)
 				m.logCard(c, t)
 				m.footer(c, t)
 			})
@@ -176,7 +185,7 @@ func (m *model) header(c *ui.Context, t *ui.Theme) {
 				})
 				ui.Column(c).Gap(2).Grow(1).Children(func() {
 					ui.Text(c, "GZIST DormSignin").FontSize(19).Bold().TextColor(ui.Hex("#FFFFFF"))
-					ui.Text(c, "やり直せますよね？ · 白云校区专属").FontSize(11.5).TextColor(ui.RGBA(255, 255, 255, 0.88))
+					ui.Text(c, "やり直せますよね？ · 学校统一认证").FontSize(11.5).TextColor(ui.RGBA(255, 255, 255, 0.88))
 				})
 			})
 		ui.Row(c).FillWidth().Height(4).Children(func() {
@@ -239,7 +248,15 @@ func (m *model) statusCard(c *ui.Context, t *ui.Theme, title, line string, col u
 			{"考勤窗口", m.cfg.AttWindow + "（晚归线 " + m.cfg.LateLine + "）"},
 			{"自动签到", strings.Join(m.cfg.Times, " / ")},
 			{"定位注入", onOff(m.cfg.GeoOn) + mustMark(m.cfg.GeoMust)},
+			{"浏览器", m.browserModeText()},
 		})
+		if m.cfg.ResidentBrowser {
+			// Same caveat as the toggle writes into the notice, kept visible: the
+			// mode changes who finishes the two-factor page, not when runs happen.
+			ui.Text(c, "常驻浏览器默认完全隐藏，不显示在任务栏或 Alt+Tab。学校要求二次验证时会显示本账号的验证窗口。"+
+				"隐藏不等于绕过二次验证；请本人完成，也可主动点击「显示验证窗口」。任务结束后隐藏，自动签到安排不变。").
+				FontSize(12).TextColor(t.TextMuted).Wrap()
+		}
 		ui.Row(c).Gap(8).Children(func() {
 			busy := m.phase == "签到中"
 			if ui.PrimaryButton(c, "立即签到").Grow(1).Disabled(busy).Clicked() {
@@ -280,6 +297,22 @@ func mustMark(must bool) string {
 		return "（必须通过）"
 	}
 	return ""
+}
+
+func (m *model) browserModeText() string {
+	if m.cfg.ResidentBrowser {
+		return "常驻（默认隐藏 · 手动显隐）"
+	}
+	return browserMode(m.cfg.VisibleBrowser)
+}
+
+// browserMode spells out the two modes without implying that visible mode
+// changes when runs happen: it only changes who finishes the two-factor page.
+func browserMode(visible bool) string {
+	if visible {
+		return "可见（二次验证需人工完成）"
+	}
+	return "隐藏"
 }
 
 func (m *model) accountCard(c *ui.Context, t *ui.Theme) {
@@ -325,7 +358,7 @@ func (m *model) accountCard(c *ui.Context, t *ui.Theme) {
 				m.act.CancelVerify()
 			}
 			dirty := m.id != m.storedID || m.pass != m.storedPass
-			if (ui.Button(c, "保存").Disabled(m.saving || !dirty || m.id == "").Clicked() || (submitted && dirty)) && m.id != "" && !m.saving {
+			if (ui.Button(c, "保存").Disabled(m.saving || m.windowBusy || !dirty || m.id == "").Clicked() || (submitted && dirty)) && m.id != "" && !m.saving && !m.windowBusy {
 				m.act.Save(m.id, m.pass)
 			}
 		})
@@ -359,6 +392,28 @@ func (m *model) switches(c *ui.Context, t *ui.Theme) {
 				m.act.SetAutostart(m.autostart)
 			}
 		})
+		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+			resident := m.cfg.ResidentBrowser
+			ui.Column(c).Grow(1).Gap(1).Children(func() {
+				ui.Text(c, "常驻浏览器")
+				ui.Text(c, "任务之间复用同一个 Edge；默认关闭。开启后宿主不可用或清理未确认时，本次任务直接停止，不会改用独立浏览器。").FontSize(11.5).TextColor(t.TextMuted).Wrap()
+			})
+			if ui.Switch(c, &resident).Label("常驻浏览器").Disabled(m.windowBusy).Changed() {
+				m.act.SetResident(resident)
+			}
+		})
+		ui.Row(c).Gap(8).Children(func() {
+			if ui.Button(c, "显示验证窗口").Grow(1).Disabled(m.windowBusy || m.saving).Clicked() && m.act.ShowBrowser != nil {
+				m.act.ShowBrowser()
+			}
+			if ui.Button(c, "隐藏浏览器").Grow(1).Disabled(m.windowBusy || m.saving).Clicked() && m.act.HideBrowser != nil {
+				m.act.HideBrowser()
+			}
+		})
+		ui.Text(c, "仅控制已保存账号的现有常驻浏览器；不会保存输入、启动浏览器或打开学校页面。").FontSize(11.5).TextColor(t.TextMuted).Wrap()
+		if m.windowMessage != "" {
+			ui.Text(c, m.windowMessage).FontSize(12).TextColor(t.TextMuted).Wrap()
+		}
 	})
 }
 
@@ -413,6 +468,6 @@ func (m *model) footer(c *ui.Context, t *ui.Theme) {
 		for _, col := range colMembers {
 			ui.Box(c).Size(6, 6).Radius(3).Background(col)
 		}
-		ui.Text(c, "it's MyGO!!!!!  ·  白云校区专属  ·  v"+m.version).FontSize(11).TextColor(t.TextMuted)
+		ui.Text(c, "it's MyGO!!!!!  ·  学校统一认证  ·  v"+m.version).FontSize(11).TextColor(t.TextMuted)
 	})
 }

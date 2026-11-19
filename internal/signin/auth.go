@@ -174,19 +174,31 @@ type authIssueError struct{ issue AuthIssue }
 func (e *authIssueError) Error() string { return authReason(e.issue) }
 
 func loginDOMIssue(ctx context.Context) AuthIssue {
+	issue, _ := loginDOMIssueRead(ctx)
+	return issue
+}
+
+// loginDOMIssueRead is the same read, reporting whether it actually worked. A
+// caller that has to compare the text before and after a submission needs the
+// difference between 「the error region is empty」 and 「the region could not be
+// read」: only the first one says that a text appearing later belongs to the
+// click that was just made.
+func loginDOMIssueRead(ctx context.Context) (AuthIssue, bool) {
 	var texts []string
 	// The error regions are shared with the bounded page-prompt look, so both
 	// readers can never drift apart. Ant Design's error modal is what the public
 	// CAS client renders. Never scan body/help text.
-	_ = chromedp.Evaluate(`(function(){`+casPageGuardJS+`
+	if err := chromedp.Evaluate(`(function(){`+casPageGuardJS+`
  return `+casErrorRegionsJS+`;
- })()`, &texts).Do(exec(ctx))
+ })()`, &texts).Do(exec(ctx)); err != nil {
+		return AuthNone, false
+	}
 	for _, text := range texts {
 		if issue := ClassifyAuthMessage(text); issue != AuthNone {
-			return issue
+			return issue, true
 		}
 	}
-	return AuthNone
+	return AuthNone, true
 }
 func loginRejected(text string) bool {
 	i := ClassifyAuthMessage(text)

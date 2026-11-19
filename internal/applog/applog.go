@@ -29,11 +29,16 @@ type Log struct {
 
 // New opens (or creates) dir/dormsign.log. An empty dir keeps logs in
 // memory only.
-func New(dir string) *Log {
+func New(dir string) *Log { return NewNamed(dir, "dormsign.log") }
+
+// NewNamed opens (or creates) dir/name. It exists so a tool can keep its own
+// file: a probe must never interleave with the sign-in log. An empty dir keeps
+// logs in memory only.
+func NewNamed(dir, name string) *Log {
 	l := &Log{now: time.Now}
 	if dir != "" {
 		os.MkdirAll(dir, 0o700)
-		l.path = filepath.Join(dir, "dormsign.log")
+		l.path = filepath.Join(dir, name)
 		l.open()
 	}
 	return l

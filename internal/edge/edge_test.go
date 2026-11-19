@@ -133,3 +133,46 @@ func TestEdgeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Visible mode is decided at launch, so the flag has to reach the command line:
+// a visible run never starts headless, and a hidden run never grows a window.
+func TestBrowserArgsFollowsTheVisibleMode(t *testing.T) {
+	hidden := strings.Join(browserArgs(store.Defaults(), "C:/p"), "\n")
+	if !strings.Contains(hidden, "--headless") {
+		t.Fatalf("hidden mode lost --headless: %s", hidden)
+	}
+	if strings.Contains(hidden, "--window-position") {
+		t.Fatalf("hidden mode grew a window position: %s", hidden)
+	}
+	cfg := store.Defaults()
+	cfg.VisibleBrowser = true
+	visible := strings.Join(browserArgs(cfg, "C:/p"), "\n")
+	if strings.Contains(visible, "--headless") {
+		t.Fatalf("visible mode still starts headless, so no window could be handed to a human: %s", visible)
+	}
+	if !strings.Contains(visible, "--window-position=80,40") {
+		t.Fatalf("visible mode has no window position: %s", visible)
+	}
+	if !strings.Contains(visible, "--user-data-dir=C:/p") {
+		t.Fatalf("visible mode lost the isolated profile: %s", visible)
+	}
+}
+
+// A locked profile must fail with a fixed Chinese sentence: the message never
+// depends on parsing (or transcoding) Chromium's localized output, and nothing
+// here tries to take the lock by force or to end somebody else's browser.
+func TestProfileLockFailureIsAFixedChineseMessage(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".dormsign.lock")
+	release, err := lockProfile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	_, err = lockProfile(p)
+	if err == nil {
+		t.Fatal("the same profile was locked twice")
+	}
+	if !strings.Contains(err.Error(), "浏览器目录正在被其他实例使用") {
+		t.Fatalf("lock error = %q, want the fixed Chinese sentence", err.Error())
+	}
+}

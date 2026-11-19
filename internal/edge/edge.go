@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/chromedp"
 	"github.com/xiaomai1011/GZIST-DormSignin-Baiyun/internal/store"
 )
@@ -22,9 +24,15 @@ const pcUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 // Session owns Edge's complete process tree (a kill-on-close Job on Windows).
 type Session struct {
-	Ctx         context.Context
-	PID         int
-	UserData    string
+	Ctx      context.Context
+	PID      int
+	UserData string
+	// Endpoint is the browser-level DevTools WebSocket URL. A separate process
+	// can attach to the same browser through it without owning the process.
+	Endpoint string
+	// TargetID is the host-owned page; clients never select a different tab.
+	TargetID    string
+	Attached    bool
 	once        sync.Once
 	kill        func() error
 	closeErr    error
@@ -32,6 +40,7 @@ type Session struct {
 	done        chan error
 	outputDone  chan struct{}
 	pipe        io.Closer
+	exited      atomic.Bool
 	ctxCancel   context.CancelFunc
 	allocCancel context.CancelFunc
 }
@@ -52,8 +61,8 @@ func ProfilePath(cfg store.Settings) (string, error) {
 }
 
 func browserArgs(cfg store.Settings, profile string) []string {
-	return []string{
-		"--headless", "--hide-scrollbars", "--mute-audio", "--no-first-run", "--no-default-browser-check",
+	args := []string{
+		"--hide-scrollbars", "--mute-audio", "--no-first-run", "--no-default-browser-check",
 		// Edge may otherwise relaunch through its compatibility shim and disconnect
 		// stdout from the actual browser. Keep the managed process as the real root.
 		"--edge-skip-compat-layer-relaunch",
@@ -70,6 +79,18 @@ func browserArgs(cfg store.Settings, profile string) []string {
 		fmt.Sprintf("--window-size=%d,%d", cfg.ViewW, cfg.ViewH),
 		"--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", "about:blank",
 	}
+	// Hidden is the default and stays exactly as it was. Visible mode is decided
+	// before the browser starts and never converted half-way: a window has to
+	// exist from the first launch for the school's two-factor page to be usable
+	// by a human, and chromedp keeps controlling it either way.
+	if cfg.VisibleBrowser {
+		// Put the window somewhere a person can see it instead of letting Edge
+		// cascade it off-screen; the size above is the login page's own.
+		args = append([]string{fmt.Sprintf("--window-position=%d,%d", 80, 40)}, args...)
+	} else {
+		args = append([]string{"--headless"}, args...)
+	}
+	return args
 }
 
 func Launch(cfg store.Settings) (*Session, error) { return LaunchContext(context.Background(), cfg) }
@@ -113,7 +134,12 @@ func LaunchContext(parent context.Context, cfg store.Settings) (*Session, error)
 	endpoint := make(chan string, 1)
 	var output tailOutput
 	go func() { defer close(s.outputDone); scanEndpoint(pipe, endpoint, &output) }()
-	go func() { <-s.outputDone; s.done <- waitOwnedProcess(cmd) }()
+	go func() {
+		<-s.outputDone
+		err := waitOwnedProcess(cmd)
+		s.exited.Store(true)
+		s.done <- err
+	}()
 	fail := func(e error) (*Session, error) {
 		e = errors.Join(e, s.Close())
 		return nil, fmt.Errorf("启动 Edge 失败（pid=%d, profile=%s）: %w; 输出: %s", s.PID, profile, e, output.String())
@@ -132,6 +158,7 @@ func LaunchContext(parent context.Context, cfg store.Settings) (*Session, error)
 	case <-timer.C:
 		return fail(fmt.Errorf("45 秒内未就绪"))
 	}
+	s.Endpoint = ws
 	allocCtx, allocCancel := chromedp.NewRemoteAllocator(parent, ws, chromedp.NoModifyURL)
 	ctx, ctxCancel := chromedp.NewContext(allocCtx)
 	s.Ctx = ctx
@@ -149,7 +176,89 @@ func LaunchContext(parent context.Context, cfg store.Settings) (*Session, error)
 	case <-timer.C:
 		return fail(fmt.Errorf("45 秒内未建立 CDP 会话"))
 	}
+	s.TargetID = string(chromedp.FromContext(ctx).Target.TargetID)
 	return s, nil
+}
+
+// Attach connects to a browser somebody else owns (the resident host) without
+// taking a Job, a profile lock or a process handle. Close on the result only
+// tears the CDP connection down: the browser keeps running for the next lease.
+// The caller is responsible for the process' lifetime and for not attaching to
+// an endpoint it was not granted.
+func Attach(parent context.Context, endpoint string, pid int, userData string, targetID string) (*Session, error) {
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
+	if endpoint == "" || targetID == "" {
+		return nil, errors.New("常驻浏览器缺少调试地址或宿主目标编号")
+	}
+	ctx, closeConnection := newAttachedContext(parent, endpoint, targetID)
+	s := &Session{Ctx: ctx, PID: pid, UserData: userData, Endpoint: endpoint,
+		TargetID: targetID, Attached: true, ctxCancel: closeConnection}
+	started := make(chan error, 1)
+	go func() { started <- chromedp.Run(ctx) }()
+	timer := time.NewTimer(45 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-started:
+		if err != nil {
+			s.Close()
+			return nil, fmt.Errorf("连接常驻浏览器失败（pid=%d）: %w", pid, err)
+		}
+	case <-parent.Done():
+		s.Close()
+		return nil, parent.Err()
+	case <-timer.C:
+		s.Close()
+		return nil, fmt.Errorf("45 秒内未连接上常驻浏览器（pid=%d）", pid)
+	}
+	return s, nil
+}
+
+// gracefulCloseBudget bounds the whole browser-level shutdown attempt: asking
+// the browser to close itself plus waiting for the owned root process to
+// disappear. A browser that ignores it is reaped by the Job below, so this is
+// only how long we are willing to ask politely.
+var gracefulCloseBudget = 8 * time.Second
+
+// gracefulCloseHook performs the browser-level shutdown. It is a variable so the
+// budget and fallback paths can be exercised without a real browser.
+var gracefulCloseHook = func(ctx context.Context) error {
+	return chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		return browser.Close().Do(ctx)
+	}))
+}
+
+// gracefulClose asks the browser to shut down and waits, within budget, for the
+// owned root process to exit. It reports whether that exit was observed;
+// anything else means the caller must fall back to the Job reaper.
+//
+// Browser.close usually reports an error because the DevTools connection drops
+// before the reply arrives. That is not a cleanup failure: only the process exit
+// decides whether the browser actually went away.
+func (s *Session) gracefulClose() bool {
+	if s.Ctx == nil || s.done == nil {
+		return false
+	}
+	deadline := time.Now().Add(gracefulCloseBudget)
+	ctx, cancel := context.WithDeadline(s.Ctx, deadline)
+	defer cancel()
+	asked := make(chan struct{})
+	// Capture the hook before the goroutine starts: a goroutine that outlives the
+	// budget must never read a variable its caller may have replaced since.
+	hook := gracefulCloseHook
+	go func() { _ = hook(ctx); close(asked) }()
+	select {
+	case <-asked:
+	case <-time.After(time.Until(deadline)):
+		return false
+	}
+	select {
+	case <-s.done:
+		return true
+	case <-time.After(time.Until(deadline)):
+		return false
+	}
 }
 
 func (s *Session) Close() error {
@@ -157,8 +266,13 @@ func (s *Session) Close() error {
 		return nil
 	}
 	s.once.Do(func() {
-		// On Windows kill also waits for every Job member to exit, not just the
-		// browser root. Never unlock a profile still owned by surviving children.
+		// Ask first: a killed Chromium may never flush its cookie store, and the
+		// profile is meant to outlive the run so a later run can reuse the
+		// session the school just granted us.
+		exited := s.gracefulClose()
+		// The reaper runs even after a graceful exit: it proves the whole tree is
+		// gone (children included) and closes the Job handle. On Windows kill also
+		// waits for every Job member, never just the browser root.
 		if s.kill != nil {
 			s.closeErr = s.kill()
 		}
@@ -171,7 +285,9 @@ func (s *Session) Close() error {
 		if s.allocCancel != nil {
 			s.allocCancel()
 		}
-		if s.done != nil {
+		if s.done != nil && !exited {
+			// gracefulClose consumed the token when the browser closed itself; any
+			// other route still has to prove the root process is gone.
 			select {
 			case <-s.done: // Forced termination has an expected nonzero exit code.
 			case <-time.After(5 * time.Second):
@@ -186,6 +302,11 @@ func (s *Session) Close() error {
 	})
 	return s.closeErr
 }
+
+// Exited reports whether the browser root process has already been reaped. A
+// long-lived owner uses it to notice a window the user closed without treating
+// that as a cleanup failure.
+func (s *Session) Exited() bool { return s.exited.Load() }
 
 // Keep draining stderr after DevTools appears; bounded storage prevents log growth.
 type tailOutput struct {

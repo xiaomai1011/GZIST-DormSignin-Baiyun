@@ -33,6 +33,24 @@ type Settings struct {
 	ViewH     int    `json:"viewH"`
 	DebugPort int    `json:"debugPort"`
 	UserData  string `json:"userDataDir"` // relative to the exe dir unless absolute
+	// VisibleBrowser starts Edge with a real window instead of --headless, so a
+	// human can finish the school's two-factor page in the very session the run
+	// is using; the program only waits and reads. It does not pause scheduling:
+	// a timed run still starts by itself, and with nobody at the keyboard the
+	// window simply waits out the run budget and the run reports "not finished".
+	VisibleBrowser bool `json:"visibleBrowser"`
+	// RememberPassword ticks the school's own 「记住密码」 checkbox (form field
+	// rememberMe) before the login is submitted. It is off by default because
+	// nothing has shown yet whether the server reduces two-factor checks for a
+	// remembered login: the setting only sends what a human could send, and a
+	// run reports whichever two-factor page it lands on.
+	RememberPassword bool `json:"rememberPassword"`
+	// ResidentBrowser keeps one Edge process alive between runs and hands each
+	// run a lease on it instead of starting a new browser. Off by default: the
+	// resident host is an experiment. When it is on, a missing or unhealthy host
+	// ends the run instead of falling back to a private browser, so a run never
+	// signs in from a process the experiment did not account for.
+	ResidentBrowser bool `json:"residentBrowser"`
 
 	Lat     float64 `json:"lat"`
 	Lon     float64 `json:"lon"`
@@ -63,6 +81,11 @@ func Defaults() Settings {
 		ViewH:     900,
 		DebugPort: 9337,
 		UserData:  "edge-userdata",
+		// Hidden by default: existing behaviour stays byte-for-byte the same.
+		VisibleBrowser: false,
+		// Off by default: ticking 「记住密码」 is an extra write on the login form
+		// and its effect on the school's two-factor step is not established.
+		RememberPassword: false,
 
 		Lat:     23.262197, // 白云校区 · 太和镇兴太三路638号（WGS-84）
 		Lon:     113.451911,

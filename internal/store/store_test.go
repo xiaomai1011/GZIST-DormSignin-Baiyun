@@ -98,3 +98,25 @@ func TestCredentialPairsConcurrentReadWriteDelete(t *testing.T) {
 		t.Fatalf("deleted pair: %q %q %v", id, pass, err)
 	}
 }
+
+// Visible-browser mode is opt-in and persistent: the default keeps every existing
+// installation on the hidden behaviour, and the choice survives a restart.
+func TestVisibleBrowserDefaultsOffAndRoundTrips(t *testing.T) {
+	if Defaults().VisibleBrowser {
+		t.Fatal("visible mode must stay off by default: the existing behaviour is the promise")
+	}
+	s := New(t.TempDir())
+	s.Keyring = &concurrentPairKeyring{values: map[string]string{}}
+	cfg := Defaults()
+	cfg.VisibleBrowser = true
+	if err := s.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Load()
+	if !got.VisibleBrowser {
+		t.Fatal("the saved visible-browser choice was lost on load")
+	}
+	if !got.AutoLogin || len(got.Times) == 0 {
+		t.Fatalf("saving the mode disturbed the rest of the settings: %+v", got)
+	}
+}

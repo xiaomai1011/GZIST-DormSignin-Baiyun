@@ -13,7 +13,7 @@
 
 **二次验证问题尚未正式解决。** 程序可以在学校允许正常账号认证时继续自动签到；学校要求手机或其他二次验证时，仍需本人完成。浏览器常驻、勾选“记住密码”或保存快照，都不等于永久免认证。
 
-2.0.20 正在整理发布，截至 2026-11-19 本次核对，GitHub 最新公开版本仍为 [v2.0.2](https://github.com/xiaomai1011/GZIST-DormSignin-Baiyun/releases/tag/v2.0.2)。请区分公开发行版、本地实测版和未发布实验功能。拟发布内容见 [2.0.20 更新说明](docs/releases/v2.0.20.md)。
+本次版本为 **2.0.20 稳定性更新**，发布范围为 Edge／学校统一认证路线。下载 [2.0.20 Release](https://github.com/xiaomai1011/GZIST-DormSignin-Baiyun/releases/tag/v2.0.20)：[便携版 EXE](https://github.com/xiaomai1011/GZIST-DormSignin-Baiyun/releases/download/v2.0.20/GZIST-DormSignin-v2.0.20.exe)、[Windows x64 安装包](https://github.com/xiaomai1011/GZIST-DormSignin-Baiyun/releases/download/v2.0.20/GZIST-DormSignin-v2.0.20-windows-x64-setup.exe)、[SHA256SUMS](https://github.com/xiaomai1011/GZIST-DormSignin-Baiyun/releases/download/v2.0.20/SHA256SUMS)。详情见 [更新说明](docs/releases/v2.0.20.md)。
 
 ## 两晚自动签到实测
 
@@ -79,9 +79,9 @@ go vet ./...
 go tool mygo build -o <隔离输出目录>
 ```
 
-**公开主分支目前仍是 v2.0.2 的代码基线；本文新增的是 2.0.20 本地实测记录与拟发布范围，不表示其源码或安装包已经发布。** 维护者的本地开发目录另含后续企业微信试验和未发布改动，尚未与两晚实测安装版对齐；这些试验代码不在本次文档提交范围内。
+本发布树已恢复 `main.go` 的 Edge／学校统一认证入口，包含对应的浏览器宿主、登录、签到、更新检查和本地回归；不包含企业微信模块、辅助账号探测程序、Python运行环境或独立快照实验。
 
-发布前须整理与已验证安装版对应的源码，排除企业微信和独立快照实验，完成回归、隔离构建、版本与哈希核验。上述整理尚未完成；本次仅更新文档，没有发布、替换安装程序或修改用户配置。
+两晚实测记录来自发布前本地安装构建。本次正式资产由整理后的已提交源码重新构建，恢复入口及版本标记、清除企业微信界面文案；不声称与旧安装文件的字节哈希相同。发布构建应满足 `vcs.modified=false`，以 Release 的 SHA256SUMS 核验下载文件。测试未触发新的学校登录或签到。
 
 ## 来源与许可
 

@@ -101,8 +101,8 @@ const (
 	ReasonPagePasswordCounter  VerifyReason = "page_password_counter"
 	ReasonPagePasswordLocked   VerifyReason = "page_password_locked"
 	ReasonPageGenericRejection VerifyReason = "page_generic_rejection"
-	ReasonCanceled                VerifyReason = "canceled"
-	ReasonCleanupUnconfirmed      VerifyReason = "cleanup_unconfirmed"
+	ReasonCanceled             VerifyReason = "canceled"
+	ReasonCleanupUnconfirmed   VerifyReason = "cleanup_unconfirmed"
 )
 
 // VerifyErrClass is a fixed, whitelisted classification of an underlying

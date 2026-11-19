@@ -36,7 +36,7 @@ func (r *Runner) recoverStep6(ctx context.Context, deadline time.Time, last page
 			return res
 		},
 		wait: func(c context.Context, b time.Duration, p func(context.Context) (pageState, error)) (pageState, time.Duration, error) {
-			return waitBusinessPage(c, b, 500*time.Millisecond, p, repairPageRoute)
+			return r.waitBusinessPhase(c, "recovery-wait", b, p)
 		},
 	})
 }

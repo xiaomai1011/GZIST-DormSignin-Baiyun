@@ -13,6 +13,16 @@ import (
 
 const pageWaitBudget = 120 * time.Second
 
+// runOrigins names the two participants whose cancellation can end a run, so the
+// wait can tell "the person stopped this run" from "the browser went away". ctx
+// is derived from the browser context (see runContext), which means a closed
+// window cancels it just like a caller cancel does; only the participants
+// themselves can say which happened.
+type runOrigins struct {
+	caller  context.Context // the run request; canceling it is an explicit stop
+	browser context.Context // the session's browser context; ending it is a closed window or a lost connection
+}
+
 // Keep browser values (including the CDP executor), but also honor the caller.
 func runContext(caller, browser context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
 	linked, cancel := context.WithCancelCause(browser)
@@ -26,10 +36,17 @@ func runContext(caller, browser context.Context, budget time.Duration) (context.
 }
 
 func canceledResult(ctx context.Context) Result {
-	if errors.Is(context.Cause(ctx), errLateLine) {
+	// A caller cancel reaches the merged context through an asynchronous
+	// AfterFunc, so this can be asked about a context that looks alive while the
+	// run is already stopped: never dereference a nil cause.
+	cause := context.Cause(ctx)
+	if errors.Is(cause, errLateLine) {
 		return Result{Reason: errLateLine.Error(), Exit: 8, Neutral: true}
 	}
-	return Result{Reason: "签到已停止: " + context.Cause(ctx).Error(), Exit: 5}
+	if cause == nil {
+		cause = context.Canceled
+	}
+	return Result{Reason: "签到已停止: " + cause.Error(), Exit: 5}
 }
 
 type pageState struct {
@@ -45,7 +62,7 @@ func pageWaitPolicy(s pageState, elapsed time.Duration, repaired bool) (ready, r
 	}
 	u, err := url.Parse(s.URL)
 	return false, !repaired && elapsed >= 3*time.Second && err == nil &&
-		u.Hostname() == "xsfw.gzist.edu.cn" && (u.Scheme == "https" || u.Scheme == "http") &&
+		schoolURL(s.URL, "xsfw.gzist.edu.cn") &&
 		!strings.HasPrefix(u.Fragment, "/xscq/grcq")
 }
 
@@ -55,9 +72,26 @@ func probePage(ctx context.Context) (pageState, error) {
 	return s, err
 }
 
+const repairPageRouteJS = `if(location.protocol==='https:' && location.hostname==='xsfw.gzist.edu.cn' && (location.port===''||location.port==='443') && !new URL(location.href).username && !new URL(location.href).password && !location.hash.startsWith('#/xscq/grcq')){location.hash='/xscq/grcq'}`
+
 func repairPageRoute(ctx context.Context) error {
 	// Re-check in the page: a redirect may have happened since the snapshot.
-	return chromedp.Evaluate(`if(location.hostname==='xsfw.gzist.edu.cn' && !location.hash.startsWith('#/xscq/grcq')){location.hash='/xscq/grcq'}`, nil).Do(exec(ctx))
+	return chromedp.Evaluate(repairPageRouteJS, nil).Do(exec(ctx))
+}
+
+// waitProgress is told what the page looks like while the wait is still running.
+// It exists because a silent budget cannot be told apart from a stuck run: on
+// 2026-10-25 a live run was killed at ~100 s into this wait and the only thing
+// the log had to show was the line before it started.
+type waitProgress func(elapsed time.Duration, s pageState, repaired bool, readErr error)
+
+// waitOptions is the injectable form of the wait. Budgets are never extended:
+// progress reporting only makes the existing wait legible.
+type waitOptions struct {
+	budget        time.Duration
+	poll          time.Duration
+	progressEvery time.Duration
+	progress      waitProgress
 }
 
 // The budget covers probes and repair too, not just sleeps between them.
@@ -65,7 +99,15 @@ func repairPageRoute(ctx context.Context) error {
 func waitBusinessPage(ctx context.Context, budget, poll time.Duration,
 	probe func(context.Context) (pageState, error), repair func(context.Context) error,
 ) (last pageState, elapsed time.Duration, err error) {
+	return waitBusinessPageWith(ctx, waitOptions{budget: budget, poll: poll}, probe, repair)
+}
+
+func waitBusinessPageWith(ctx context.Context, opts waitOptions,
+	probe func(context.Context) (pageState, error), repair func(context.Context) error,
+) (last pageState, elapsed time.Duration, err error) {
+	budget, poll := opts.budget, opts.poll
 	start := time.Now()
+	nextReport := opts.progressEvery
 	defer func() { elapsed = time.Since(start) }()
 	waitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -95,6 +137,10 @@ func waitBusinessPage(ctx context.Context, budget, poll time.Duration,
 					detail = "已尝试一次路由修复，仍未出现查寝内容"
 				}
 			}
+		}
+		if opts.progress != nil && opts.progressEvery > 0 && time.Since(start) >= nextReport {
+			nextReport = time.Since(start) + opts.progressEvery
+			opts.progress(time.Since(start), last, repaired, probeErr)
 		}
 		if err := sleepCtx(waitCtx, poll); err != nil {
 			return last, 0, fmt.Errorf("%w；%s", context.Cause(waitCtx), detail)

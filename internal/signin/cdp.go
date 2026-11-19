@@ -30,18 +30,18 @@ func exec(ctx context.Context) context.Context {
 	return cdp.WithExecutor(ctx, c.Target)
 }
 
-// dispatchMouseClick sends moved→pressed→released, a trusted gesture.
-func dispatchMouseClick(ctx context.Context, x, y float64) {
-	if x < 0 || y < 0 {
-		return
+// dispatchMouseClick sends one moved→pressed→released gesture. Errors may
+// indicate a partial gesture; callers must not retry an unknown submission.
+func dispatchMouseClick(ctx context.Context, x, y float64) error {
+	return mouseClickWith(ctx, x, y, nil, sendMouseEvent, sleepCtx)
+}
+
+func sendMouseEvent(ctx context.Context, kind input.MouseType, x, y float64) error {
+	p := input.DispatchMouseEvent(kind, x, y)
+	if kind != input.MouseMoved {
+		p = p.WithButton(input.Left).WithClickCount(1)
 	}
-	_ = input.DispatchMouseEvent(input.MouseMoved, x, y).Do(exec(ctx))
-	time.Sleep(90 * time.Millisecond)
-	_ = input.DispatchMouseEvent(input.MousePressed, x, y).
-		WithButton(input.Left).WithClickCount(1).Do(exec(ctx))
-	time.Sleep(90 * time.Millisecond)
-	_ = input.DispatchMouseEvent(input.MouseReleased, x, y).
-		WithButton(input.Left).WithClickCount(1).Do(exec(ctx))
+	return p.Do(exec(ctx))
 }
 
 // dispatchTouchAt sends touchStart/touchEnd — some buttons under the

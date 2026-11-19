@@ -9,6 +9,7 @@ require (
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/image v0.46.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
@@ -21,7 +22,6 @@ require (
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 )
 
 tool github.com/egoist/mygo/cmd/mygo
